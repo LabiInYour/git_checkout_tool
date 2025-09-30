@@ -22,7 +22,7 @@ from tkinter.font import Font
 
 # --- 版本与更新配置 ---
 APP_VERSION = "5.0.0"
-UPDATE_URL = "https://api.github.com/repos/LabiInYour/git_checkout_tool/releases/latest" #!TODO: 请替换为你的GitHub仓库地址
+UPDATE_URL = "https://api.github.com/repos/LabiInYour/git_checkout_tool/releases/latest"
 
 # --- 主题、配置和基本数据结构 ---
 
@@ -332,6 +332,27 @@ class GitSubmoduleManager:
         except Exception as e:
             return OperationResult(False, f"异常: {e}", str(repo), time.time() - start_time)
 
+    def pull_current_branch(self, repo: Path) -> OperationResult:
+        """拉取当前分支的最新代码"""
+        start_time = time.time()
+        try:
+            current_ref = self.get_current_ref(repo)
+            
+            # 只有在分支上才能 pull
+            if current_ref.ref_type != RefType.BRANCH:
+                return OperationResult(False, f"当前不在分支上 ({current_ref.name})，无法 pull", str(repo), time.time() - start_time)
+            
+            # 执行 git pull
+            self.logger.info(f"在 {repo.name} 上为分支 '{current_ref.name}' 执行 pull...")
+            pull_result = self._run_git_command(repo, ['pull', 'origin', current_ref.name])
+            
+            if pull_result.returncode != 0:
+                return OperationResult(False, f"Pull 失败: {pull_result.stderr.strip()}", str(repo), time.time() - start_time)
+            
+            return OperationResult(True, f"Pull 成功 ({current_ref.name})", str(repo), time.time() - start_time)
+        except GitOperationError as e:
+            return OperationResult(False, f"Git 操作异常: {e}", str(repo), time.time() - start_time)
+
     def check_working_tree_clean(self, repo: Path) -> bool:
         status = self._run_git_command(repo, ['status', '--porcelain'], timeout=10)
         return status.returncode == 0 and not status.stdout.strip()
@@ -404,12 +425,15 @@ class GitSubmoduleManager:
                     self.logger.error(f"✗ {repo.name}: 异常 {e}")
         return res
 
-    def build_project(self, progress_callback=None) -> OperationResult:
+    def build_project(self, progress_callback=None, build_commands=None) -> OperationResult:
         if not self.platform_dir.exists():
             return OperationResult(False, f"platform 目录不存在: {self.platform_dir}")
         bp = self.root_dir / 'build.py'
         if not bp.exists():
             return OperationResult(False, f"找不到 build.py: {bp}")
+        
+        # 使用传入的命令或默认命令
+        commands = build_commands if build_commands is not None else self.BUILD_COMMANDS
         
         result_file = self.root_dir / 'result.txt'
         
@@ -420,16 +444,16 @@ class GitSubmoduleManager:
         try:
             # 执行第一条命令
             if progress_callback:
-                progress_callback(10, f"运行: {' '.join(self.BUILD_COMMANDS[0])}")
-            subprocess.run(self.BUILD_COMMANDS[0], cwd=self.root_dir, check=True)
+                progress_callback(10, f"运行: {' '.join(commands[0])}")
+            subprocess.run(commands[0], cwd=self.root_dir, check=True)
             
             # 执行第二条命令并捕获输出
             if progress_callback:
-                progress_callback(15, f"运行: {' '.join(self.BUILD_COMMANDS[1])}")
+                progress_callback(15, f"运行: {' '.join(commands[1])}")
             
             with open(result_file, 'w', encoding='utf-8') as f:
                 process = subprocess.Popen(
-                    self.BUILD_COMMANDS[1], cwd=self.root_dir, stdout=subprocess.PIPE, 
+                    commands[1], cwd=self.root_dir, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, bufsize=1, encoding='utf-8'
                 )
                 
@@ -475,7 +499,7 @@ class GitSubmoduleManager:
                 progress_callback(100, "编译完成")
                 
         except subprocess.CalledProcessError as e:
-            return OperationResult(False, f"编译命令失败: {self.BUILD_COMMANDS[1]}, 返回码 {e.returncode}, {getattr(e, 'output', '')}")
+            return OperationResult(False, f"编译命令失败: {commands[1]}, 返回码 {e.returncode}, {getattr(e, 'output', '')}")
             
         return OperationResult(True, f"编译完成，输出已保存至 {result_file}")
 
@@ -676,14 +700,15 @@ del "{updater_script_path.name}"
         buttons = [
             ("🔄 切换分支/标签", self.switch_refs, "Primary.TButton", "Ctrl+S"),
             ("🎯 一键切换Base", self.switch_base_branches, "Info.TButton", "Ctrl+D"),
+            ("⬇️ Pull当前分支", self.pull_current_branches, "Warning.TButton", "Ctrl+P"),
             ("🔨 执行编译", self.build_project, "Success.TButton", "Ctrl+B"),
         ]
         for i, (text, command, style, shortcut) in enumerate(buttons):
-            row, col = divmod(i, 3)
+            row, col = divmod(i, 2)  # 2列布局，自动形成2行
             btn = ttk.Button(toolbar_frame, text=text, command=command, style=style, width=20)
             btn.grid(row=row, column=col, padx=8, pady=5, sticky="ew")
             self._create_tooltip(btn, f"{text}\n快捷键: {shortcut}")
-        for col in range(3):
+        for col in range(2):
             toolbar_frame.grid_columnconfigure(col, weight=1)
 
     def _create_main_content(self):
@@ -900,6 +925,7 @@ del "{updater_script_path.name}"
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.root.bind('<Control-s>', lambda e: self.switch_refs())
         self.root.bind('<Control-d>', lambda e: self.switch_base_branches())
+        self.root.bind('<Control-p>', lambda e: self.pull_current_branches())
         self.root.bind('<Control-b>', lambda e: self.build_project())
         self.root.bind('<Control-q>', lambda e: self._on_closing())
         self.root.bind('<F1>', lambda e: self._show_help())
@@ -1279,6 +1305,8 @@ del "{updater_script_path.name}"
 
         if mode == "base_branch":
             self._create_base_branch_preview(right_frame)
+        elif mode == "pull":
+            self._create_pull_preview(right_frame)
         else:
             self._create_selected_preview(right_frame)
 
@@ -1327,7 +1355,16 @@ del "{updater_script_path.name}"
             
         button_frame = ttk.Frame(bottom_frame)
         button_frame.pack(fill=tk.X, pady=(10, 0))
-        confirm_btn_text = "🚀 开始切换" if mode=="standard" else "🚀 一键切换Base分支"
+        # 根据模式设置不同的按钮文本
+        if mode == "standard":
+            confirm_btn_text = "🚀 开始切换"
+        elif mode == "base_branch":
+            confirm_btn_text = "🚀 一键切换Base分支"
+        elif mode == "pull":
+            confirm_btn_text = "🚀 开始Pull"
+        else:
+            confirm_btn_text = "🚀 确认"
+        
         ttk.Button(button_frame, text=confirm_btn_text, command=on_confirm, style="Success.TButton").pack(side=tk.RIGHT)
         ttk.Button(button_frame, text="❌ 取消", command=win.destroy, style="Secondary.TButton", width=10).pack(side=tk.RIGHT, padx=(0, 10))
 
@@ -1341,7 +1378,7 @@ del "{updater_script_path.name}"
         if mode == "standard":
             return (result["subs"], result["ref"])
         else:
-            # base_branch模式返回包含sibling信息的结果
+            # base_branch和pull模式返回包含sibling信息的结果
             return {"modules": result["subs"], "include_sibling": result.get("include_sibling", False)}
 
     def _create_module_selection(self, parent):
@@ -1369,6 +1406,8 @@ del "{updater_script_path.name}"
                 self._update_base_branch_preview()
             if hasattr(self, 'selected_listbox') and self.selected_listbox.winfo_exists():
                 self._update_selected_preview()
+            if hasattr(self, 'pull_preview_listbox') and self.pull_preview_listbox.winfo_exists():
+                self._update_pull_preview()
 
         # 添加子模块选项
         for info in self.module_info_cache:
@@ -1398,9 +1437,9 @@ del "{updater_script_path.name}"
             self._create_tooltip(status_label, f"{info.name}\n状态: {status_tooltip}")
             self.sub_vars.append((var, sub_path))
 
-        # 在base_branch模式下添加toyota_目录选项（显示为Toyota_Apollo_DSP_GriffinXP）
+        # 在base_branch和pull模式下添加toyota_目录选项（显示为Toyota_Apollo_DSP_GriffinXP）
         sibling_path = self.manager.root_dir  # 指向toyota_目录本身
-        if hasattr(self, 'current_dialog_mode') and self.current_dialog_mode == "base_branch":
+        if hasattr(self, 'current_dialog_mode') and self.current_dialog_mode in ["base_branch", "pull"]:
             # toyota_目录肯定存在且有.git目录
             if sibling_path.exists() and (sibling_path / '.git').exists():
                 # 添加分隔线
@@ -1467,6 +1506,8 @@ del "{updater_script_path.name}"
             self._update_base_branch_preview()
         if hasattr(self, 'selected_listbox') and self.selected_listbox.winfo_exists():
             self._update_selected_preview()
+        if hasattr(self, 'pull_preview_listbox') and self.pull_preview_listbox.winfo_exists():
+            self._update_pull_preview()
             
     def _update_selected_preview(self):
         if not hasattr(self, 'selected_listbox'): return
@@ -1527,6 +1568,69 @@ del "{updater_script_path.name}"
         else:
             self.base_preview_listbox.insert(tk.END, "✅ 选择模块后将显示对应的Base分支名")
     
+    def _create_pull_preview(self, parent):
+        """创建Pull预览"""
+        self.pull_preview_listbox = tk.Listbox(parent, selectmode=tk.SINGLE, exportselection=False, bg=ThemeColors.SURFACE, fg=ThemeColors.ON_SURFACE, font=self.log_font, height=20, activestyle='none')
+        listbox_scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.pull_preview_listbox.yview)
+        self.pull_preview_listbox.config(yscrollcommand=listbox_scrollbar.set)
+        self.pull_preview_listbox.pack(side="left", fill="both", expand=True)
+        listbox_scrollbar.pack(side="right", fill="y")
+        self._update_pull_preview()
+
+    def _update_pull_preview(self):
+        """更新Pull预览"""
+        if not hasattr(self, 'pull_preview_listbox'): return
+        self.pull_preview_listbox.delete(0, tk.END)
+        selected_modules = [sub for var, sub in self.sub_vars if var.get()]
+        
+        # 检查用户是否选中主库选项
+        sibling_path = self.manager.root_dir
+        include_sibling = False
+        if hasattr(self, 'sibling_var') and self.sibling_var is not None:
+            include_sibling = self.sibling_var.get()
+        
+        if selected_modules or include_sibling:
+            # 计算总数
+            total_count = len(selected_modules)
+            has_sibling = include_sibling and sibling_path.exists() and (sibling_path / '.git').exists()
+            if has_sibling:
+                total_count += 1
+            
+            self.pull_preview_listbox.insert(tk.END, f"⬇️ 将Pull以下仓库的当前分支 ({total_count} 个):")
+            self.pull_preview_listbox.insert(tk.END, "")
+            
+            # 显示选中的子模块 - 使用缓存的模块信息避免卡顿
+            for i, sub in enumerate(selected_modules, 1):
+                # 从缓存中查找模块信息，避免实时执行git命令
+                module_info = next((info for info in self.module_info_cache if sub.name == info.name), None)
+                if module_info:
+                    branch_info = module_info.current_ref.name if module_info.current_ref.ref_type == RefType.BRANCH else "非分支"
+                else:
+                    branch_info = "未知"
+                
+                self.pull_preview_listbox.insert(tk.END, f"{i:2d}. 📦 {sub.name}")
+                self.pull_preview_listbox.insert(tk.END, f"    └─ ⬇️ Pull分支: {branch_info}")
+                self.pull_preview_listbox.insert(tk.END, "")
+            
+            # 显示主库 - 使用缓存的主库分支信息
+            if has_sibling:
+                # 从主库分支变量中获取信息，避免实时查询
+                main_branch_text = self.main_branch_var.get()
+                # 提取分支名称（格式：主库分支: 🌿 branch_name）
+                if "🌿" in main_branch_text:
+                    branch_info = main_branch_text.split("🌿")[-1].strip()
+                elif "🏷️" in main_branch_text:
+                    branch_info = "非分支(标签)"
+                elif "🔗" in main_branch_text:
+                    branch_info = "非分支(detached)"
+                else:
+                    branch_info = "未知"
+                
+                self.pull_preview_listbox.insert(tk.END, f"{total_count:2d}. 📁 Toyota_Apollo_DSP_GriffinXP (主库)")
+                self.pull_preview_listbox.insert(tk.END, f"    └─ ⬇️ Pull分支: {branch_info}")
+        else:
+            self.pull_preview_listbox.insert(tk.END, "✅ 选择模块后将显示对应的分支信息")
+    
     def _set_ref(self, ref_name: str):
         if hasattr(self, 'ref_entry'):
             self.ref_entry.delete(0, tk.END)
@@ -1563,6 +1667,83 @@ del "{updater_script_path.name}"
         include_sibling = dialog_result["include_sibling"]
         
         self._execute_base_branch_switch(selected_modules, include_sibling)
+
+    def pull_current_branches(self):
+        """Pull当前分支最新代码"""
+        if self._start_operation("初始化Pull操作") is False: return
+        dialog_result = self._show_module_selection_dialog("⬇️ Pull当前分支最新代码", mode="pull")
+        if not dialog_result:
+            self._end_operation()
+            return
+        
+        # 提取子模块列表和sibling选择状态
+        selected_modules = dialog_result["modules"]
+        include_sibling = dialog_result["include_sibling"]
+        
+        self._execute_pull_current(selected_modules, include_sibling)
+
+    def _execute_pull_current(self, selected_modules: List[Path], include_sibling: bool = False):
+        """执行pull当前分支操作"""
+        self.operation_name_var.set("Pull当前分支最新代码")
+        
+        # 添加主库到处理列表（根据用户选择）
+        all_paths_to_process = []
+        
+        # 先添加选中的子模块
+        all_paths_to_process.extend(selected_modules)
+        
+        # 根据传入的参数决定是否添加主库
+        main_repo_path = self.manager.root_dir
+        
+        # 如果用户选中主库，且路径存在且是git仓库，则添加
+        if include_sibling and main_repo_path.exists() and (main_repo_path / '.git').exists():
+            all_paths_to_process.append(main_repo_path)
+            self.log(f"添加主库到Pull列表: {main_repo_path.name}", "INFO")
+        
+        # 如果没有任何路径需要处理，直接结束
+        if not all_paths_to_process:
+            self._end_operation(0, 0)
+            return
+        
+        def task():
+            # Pull操作不需要检查工作区状态，直接执行
+            res = {'success': [], 'failure': [], 'dirty': []}
+            total = len(all_paths_to_process)
+            
+            self.manager.logger.info("开始执行Pull操作...")
+            max_workers_op = self.manager.config.max_workers or min(total, (os.cpu_count() or 4) * 2)
+            with ThreadPoolExecutor(max_workers=max_workers_op) as exe:
+                futs = {exe.submit(self.manager.pull_current_branch, repo): repo for repo in all_paths_to_process}
+                completed = 0
+                for fut in as_completed(futs):
+                    completed += 1
+                    repo = futs[fut]
+                    if self.update_progress_from_thread:
+                        progress = int(completed / total * 100)
+                        self.update_progress_from_thread(progress, f"处理中: {repo.name}...")
+                    try:
+                        r = fut.result()
+                        if r.success:
+                            res['success'].append(r)
+                            self.manager.logger.info(f"✓ {repo.name}: {r.message} ({r.duration:.1f}s)")
+                        else:
+                            res['failure'].append(r)
+                            self.manager.logger.error(f"✗ {repo.name}: {r.message} ({r.duration:.1f}s)")
+                    except Exception as e:
+                        error_result = OperationResult(False, f"异常: {e}", str(repo))
+                        res['failure'].append(error_result)
+                        self.manager.logger.error(f"✗ {repo.name}: 异常 {e}")
+            
+            # 处理结果
+            success_count = len(res.get('success', []))
+            total_count = len(all_paths_to_process)
+            out = self._format_results(res)
+            
+            self.root.after(0, lambda: self._show_result(out, f"Pull当前分支 - 操作结果"))
+            self.root.after(0, lambda: self._end_operation(success_count, total_count))
+            self.root.after(100, self.async_load_initial_data)
+        
+        threading.Thread(target=task, daemon=True).start()
 
     def _execute_switch(self, subs: List[Path], ref: str):
         self.operation_name_var.set(f"切换到 {ref}")
@@ -1747,16 +1928,65 @@ del "{updater_script_path.name}"
         threading.Thread(target=task, daemon=True).start()
 
     def build_project(self):
-        if self._start_operation("项目编译") is False: return
+        self._show_build_options_dialog()
+
+    def _show_build_options_dialog(self):
+        win = tk.Toplevel(self.root)
+        win.title("选择编译类型")
+        win.geometry("350x180")
+        win.transient(self.root)
+        win.grab_set()
+        win.configure(bg=ThemeColors.BACKGROUND)
+        try:
+            win.iconbitmap(self._resource_path("icon.ico"))
+        except:
+            pass
+        self._center_on_parent(win)
+
+        main_frame = ttk.Frame(win, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(main_frame, text="请选择要执行的编译任务", font=self.subtitle_font).pack(pady=(0, 20))
+
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.BOTH, expand=True)
+
+        bev_button = ttk.Button(btn_frame, text="Bev 编译", style="Primary.TButton", command=lambda: (win.destroy(), self._start_bev_build()))
+        bev_button.pack(side=tk.LEFT, expand=True, padx=5, ipady=10)
+
+        ml12_button = ttk.Button(btn_frame, text="ML12 编译", style="Success.TButton", command=lambda: (win.destroy(), self._start_ml12_build()))
+        ml12_button.pack(side=tk.RIGHT, expand=True, padx=5, ipady=10)
+        
+        win.bind("<Escape>", lambda e: win.destroy())
+
+    def _start_ml12_build(self):
+        if self._start_operation("ML12 项目编译") is False: return
         
         def task():
             result = self.manager.build_project(self.update_progress_from_thread)
             if result.success:
-                # 编译成功 - 强制弹到最前面
                 self.root.after(0, lambda: self._show_build_success(result.message))
                 self.root.after(0, lambda: self._end_operation(1, 1))
             else:
-                # 编译失败 - 强制弹到最前面
+                self.root.after(0, lambda: self._show_build_error(result.message))
+                self.root.after(0, lambda: self._end_operation(0, 1))
+        
+        threading.Thread(target=task, daemon=True).start()
+
+    def _start_bev_build(self):
+        if self._start_operation("Bev 项目编译") is False: return
+        
+        bev_commands = [
+            ['py', '-3.7', 'build.py', '-c', '-f'],
+            ['python', 'build.py', '-a', 'adspsc593', '-p', 'c_ap_program_area_d17', '-dl', '-l', 'info', '-b', 'release', '-f']
+        ]
+
+        def task():
+            result = self.manager.build_project(self.update_progress_from_thread, build_commands=bev_commands)
+            if result.success:
+                self.root.after(0, lambda: self._show_build_success(result.message))
+                self.root.after(0, lambda: self._end_operation(1, 1))
+            else:
                 self.root.after(0, lambda: self._show_build_error(result.message))
                 self.root.after(0, lambda: self._end_operation(0, 1))
         
@@ -1764,16 +1994,18 @@ del "{updater_script_path.name}"
     
     def _show_help(self):
         help_text = """
-🚀 Harman Git 子模块管理工具 v5.0 
+🚀 Harman Git 子模块管理工具 v5.0
 
 【主要功能】
 • 🔄 批量切换子模块分支/标签
 • 🎯 一键切换选中模块到对应的Base分支
+• ⬇️ Pull当前分支最新代码
 • 🔨 执行项目编译脚本
 
 【快捷键】
 • Ctrl+S: 切换分支/标签
 • Ctrl+D: 一键切换Base分支
+• Ctrl+P: Pull当前分支
 • Ctrl+B: 执行编译
 • Ctrl+Q: 退出应用
 • F1:     显示帮助
