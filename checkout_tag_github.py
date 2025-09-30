@@ -16,14 +16,13 @@ import webbrowser
 from urllib.parse import urlparse
 import re
 import requests
-
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, END, filedialog
 from tkinter.font import Font
 
 # --- 版本与更新配置 ---
 APP_VERSION = "5.0.0"
-UPDATE_URL = "https://api.github.com/repos/YOUR_USERNAME/YOUR_REPONAME/releases/latest" #!TODO: 请替换为你的GitHub仓库地址
+UPDATE_URL = "https://api.github.com/repos/LabiInYour/git_checkout_tool/releases/latest" #!TODO: 请替换为你的GitHub仓库地址
 
 # --- 主题、配置和基本数据结构 ---
 
@@ -512,7 +511,6 @@ class ModernGitSubmoduleGUI:
     def _update_check_worker(self) -> Optional[Dict]:
         """[工作线程] 从远程URL获取最新版本信息"""
         try:
-            #!TODO: 请确保你的UPDATE_URL是有效的
             if "YOUR_USERNAME" in UPDATE_URL:
                 self.log("更新URL未配置，跳过检查。", "WARNING")
                 return None
@@ -524,13 +522,23 @@ class ModernGitSubmoduleGUI:
             latest_version = latest_release.get("tag_name", "").lstrip('v')
             current_version = APP_VERSION
 
-            # 版本号比较 (简单的字符串比较)
             if latest_version and latest_version > current_version:
-                return {
-                    "latest_version": latest_version,
-                    "download_url": latest_release["assets"]["browser_download_url"],
-                    "release_notes": latest_release.get("body", "没有发布说明。")
-                }
+                assets = latest_release.get("assets", [])
+                download_url = None
+                for asset in assets:
+                    if asset.get("name", "").endswith(".exe"):
+                        download_url = asset.get("browser_download_url")
+                        break
+                
+                if download_url:
+                    return {
+                        "latest_version": latest_version,
+                        "download_url": download_url,
+                        "release_notes": latest_release.get("body", "没有发布说明。")
+                    }
+                else:
+                    self.log("在新版本中未找到.exe下载文件。", "WARNING")
+
         except requests.RequestException as e:
             self.log(f"检查更新失败: {e}", "WARNING")
         except (KeyError, IndexError) as e:
@@ -544,17 +552,75 @@ class ModernGitSubmoduleGUI:
             msg = (
                 f"发现新版本: v{update_info['latest_version']} (当前版本: v{APP_VERSION})\n\n"
                 f"更新内容:\n{update_info['release_notes']}\n\n"
-                "是否立即打开下载页面？"
+                "是否立即自动下载并安装更新？"
             )
             if messagebox.askyesno("发现新版本", msg, parent=self.root):
-                try:
-                    webbrowser.open(update_info['download_url'])
-                    self.log(f"已打开下载页面: {update_info['download_url']}", "INFO")
-                except Exception as e:
-                    self._show_error(f"无法打开浏览器: {e}")
-
+                self._download_and_apply_update(update_info['download_url'])
         else:
             self.log("当前已是最新版本。", "INFO")
+
+    def _download_and_apply_update(self, download_url: str):
+        """启动后台线程以下载并应用更新"""
+        if self._start_operation("应用更新") is False: return
+        self.log(f"开始从 {download_url} 下载更新...", "INFO")
+        self.notebook.select(0) # 切换到进度标签页
+        self._run_in_thread(self._update_worker, self._on_update_finished, download_url)
+
+    def _update_worker(self, url: str) -> str:
+        """[工作线程] 执行下载、创建更新脚本并退出"""
+        try:
+            # 确定可执行文件名
+            exe_path = Path(sys.executable)
+            exe_name = exe_path.name
+            update_tmp_path = exe_path.parent / "update.tmp"
+
+            # 下载新版本
+            with requests.get(url, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                total_size = int(r.headers.get('content-length', 0))
+                bytes_downloaded = 0
+                with open(update_tmp_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        bytes_downloaded += len(chunk)
+                        if total_size > 0:
+                            progress = (bytes_downloaded / total_size) * 100
+                            self.update_progress_from_thread(progress, f"下载中... {bytes_downloaded/1024/1024:.1f}MB / {total_size/1024/1024:.1f}MB")
+            
+            self.log("下载完成，准备应用更新...", "SUCCESS")
+
+            # 创建 updater.bat 脚本
+            updater_script_path = exe_path.parent / "updater.bat"
+            script_content = f"""
+@echo off
+echo Waiting for application to close...
+timeout /t 3 /nobreak > nul
+echo Replacing executable...
+move /Y "{update_tmp_path.name}" "{exe_name}" > nul
+echo Relaunching application...
+start "" "{exe_name}"
+echo Cleaning up...
+del "{updater_script_path.name}"
+"""
+            with open(updater_script_path, "w", encoding="utf-8") as f:
+                f.write(script_content)
+
+            # 启动脚本并准备退出
+            subprocess.Popen([str(updater_script_path)], creationflags=subprocess.DETACHED_PROCESS, shell=True)
+            return "restarting"
+
+        except Exception as e:
+            self.log(f"更新过程中发生错误: {e}", "ERROR")
+            return f"更新失败: {e}"
+
+    def _on_update_finished(self, result: str):
+        """[UI线程] 更新工作完成后，退出应用或显示错误"""
+        if result == "restarting":
+            self.log("应用即将重启以完成更新...", "INFO")
+            self.root.after(1000, self.root.destroy) # 延迟1秒后关闭
+        else:
+            self._show_error(result)
+            self._end_operation(0, 1)
 
     def _init_root_window(self):
         self.root = tk.Tk()
