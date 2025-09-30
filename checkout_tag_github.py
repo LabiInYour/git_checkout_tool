@@ -699,13 +699,16 @@ del "{updater_script_path.name}"
         toolbar_frame.pack(fill=tk.X, pady=(0, 15))
         buttons = [
             ("🔄 切换分支/标签", self.switch_refs, "Primary.TButton", "Ctrl+S"),
-            ("🎯 一键切换Base", self.switch_base_branches, "Info.TButton", "Ctrl+D"),
+            ("🎯 一键切换Base(暂时禁用)", self.switch_base_branches, "Info.TButton", "Ctrl+D"),
             ("⬇️ Pull当前分支", self.pull_current_branches, "Warning.TButton", "Ctrl+P"),
             ("🔨 执行编译", self.build_project, "Success.TButton", "Ctrl+B"),
         ]
         for i, (text, command, style, shortcut) in enumerate(buttons):
             row, col = divmod(i, 2)  # 2列布局，自动形成2行
             btn = ttk.Button(toolbar_frame, text=text, command=command, style=style, width=20)
+            # 禁用"一键切换Base"按钮
+            if text == "🎯 一键切换Base(暂时禁用)":
+                btn.config(state='disabled')
             btn.grid(row=row, column=col, padx=8, pady=5, sticky="ew")
             self._create_tooltip(btn, f"{text}\n快捷键: {shortcut}")
         for col in range(2):
